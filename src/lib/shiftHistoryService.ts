@@ -1,3 +1,4 @@
+import type { CashDenominations } from './cashDenominations';
 import { supabase } from './supabaseClient';
 
 export interface ShiftRegisterReadable {
@@ -14,6 +15,9 @@ export interface ShiftRegisterReadable {
   deposits_made: number;
   cash_returned: number;
   credits_refunded: number;
+  credits_received: number;
+  opening_denominations: CashDenominations | null;
+  closing_denominations: CashDenominations | null;
   expected_closing: number | null;
   counted_closing: number | null;
   mismatch: number | null;

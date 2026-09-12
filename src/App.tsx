@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/AuthContext';
-import { initOfflineSync } from './lib/offlineQueue';
+import { initOfflineSync, setCashContext } from './lib/offlineQueue';
 import { getOpenRegister } from './lib/shiftService';
 import { useIdleLogout } from './lib/useIdleLogout';
 import Login from './pages/Login';
@@ -45,7 +45,7 @@ function Shell() {
   const [registerLoading, setRegisterLoading] = useState(true);
 
   useEffect(() => {
-    initOfflineSync();
+    return initOfflineSync();
   }, []);
 
   // Counter phones are shared between staff — auto-sign-out after
@@ -60,19 +60,31 @@ function Shell() {
   // gating entirely and land on a cross-outlet overview instead of
   // the register-scoped Dashboard (which they have no register for —
   // previously this fell through to an infinite redirect loop).
-  const needsShiftGate = appUser && appUser.outlet_id;
+  const actorId = appUser?.id;
+  const outletId = appUser?.outlet_id;
+  const needsShiftGate = !!outletId;
   const isHqOrAudit = appUser?.role === 'hq' || appUser?.role === 'audit';
   const canSeeAuditLog = appUser?.role === 'manager' || isHqOrAudit;
 
   useEffect(() => {
-    if (!needsShiftGate) {
-      setRegisterLoading(false);
-      return;
-    }
-    getOpenRegister(appUser!.outlet_id!)
-      .then(setRegister)
-      .finally(() => setRegisterLoading(false));
-  }, [needsShiftGate, appUser]);
+    setCashContext(null);
+    setRegister(null);
+    if (!needsShiftGate || !actorId || !outletId) { setRegisterLoading(false); return; }
+    let cancelled = false;
+    setRegisterLoading(true);
+    const cacheKey = `cash-register:${actorId}:${outletId}`;
+    getOpenRegister(outletId!)
+      .then((r) => { if (!cancelled) { setRegister(r); if (r) localStorage.setItem(cacheKey, JSON.stringify(r)); else localStorage.removeItem(cacheKey); } })
+      .catch(() => { if (!cancelled && !navigator.onLine) { const cached = localStorage.getItem(cacheKey); if (cached) { try { setRegister(JSON.parse(cached) as ShiftRegister); } catch { localStorage.removeItem(cacheKey); } } } })
+      .finally(() => { if (!cancelled) setRegisterLoading(false); });
+    return () => { cancelled = true; };
+  }, [needsShiftGate, actorId, outletId]);
+
+  useEffect(() => {
+    setCashContext(appUser?.is_active && register?.status === 'open' && register.outlet_id === appUser.outlet_id
+      ? { actorId: appUser.id, outletId: register.outlet_id, registerId: register.id } : null);
+    return () => setCashContext(null);
+  }, [appUser, register]);
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center">Loading…</div>;

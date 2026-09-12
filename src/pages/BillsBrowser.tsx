@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { searchBills } from '../lib/billService';
 import type { Bill, BillStatus } from '../lib/types';
+import { businessDate } from '../lib/cashDenominations';
+import { billCsvRow, getBillsForExport } from '../lib/billExportService';
+import { downloadCsv } from '../lib/csvExport';
 
 const STATUS_OPTIONS: BillStatus[] = ['open', 'partial', 'paid', 'cancelled'];
 
@@ -16,6 +19,22 @@ export default function BillsBrowser() {
   const [status, setStatus] = useState<BillStatus | ''>('');
   const [bills, setBills] = useState<Bill[]>([]);
   const [loading, setLoading] = useState(true);
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
+  const [exporting, setExporting] = useState(false);
+  const [message, setMessage] = useState('');
+
+  async function exportBills() {
+    setExporting(true); setMessage('');
+    try {
+      const rows = await getBillsForExport({ from, to, serial, status });
+      if (!rows.length) { setMessage('No bills match this date range and these filters.'); return; }
+      const timestamp = new Date().toISOString();
+      downloadCsv(`bill-reconciliation-${from}-to-${to}.csv`, rows.map((b) => billCsvRow(b, timestamp)));
+      setMessage(`Exported ${rows.length} bills.`);
+    } catch (e) { setMessage(e instanceof Error ? e.message : 'Export failed. Please retry.'); }
+    finally { setExporting(false); }
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -26,6 +45,17 @@ export default function BillsBrowser() {
 
   return (
     <div className="max-w-3xl mx-auto space-y-4">
+      <div className="bg-white p-4 rounded-lg space-y-3">
+        <h1 className="font-semibold">Billing-software reconciliation CSV</h1>
+        <p className="text-sm text-slate-600">One row per bill, with cash and online payments shown separately. Dates select bills by their register date in India; payment totals include collections made later, up to export time. Export includes all matching bills across your permitted outlets.</p>
+        <div className="flex flex-wrap gap-3 items-end">
+          <label>From<input aria-label="Export from date" className="block border rounded p-2" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+          <label>To<input aria-label="Export to date" className="block border rounded p-2" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+          <button onClick={() => void exportBills()} disabled={exporting} className="bg-slate-800 text-white px-4 py-2 rounded disabled:opacity-40">{exporting ? 'Exporting…' : 'Export bill CSV'}</button>
+        </div>
+        <p className="text-xs text-slate-500">Uses the bill number and status filters below. For comparison, match bill number + outlet. Import bill numbers as text to preserve leading zeros. Export during a quiet period if payments are still being entered.</p>
+        {message && <p role="status" className="text-sm">{message}</p>}
+      </div>
       <div className="flex gap-2">
         <input
           className="flex-1 border border-slate-300 rounded-lg px-4 py-3"

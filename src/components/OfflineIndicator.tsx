@@ -26,8 +26,9 @@ export default function OfflineIndicator() {
   }, []);
 
   async function handleDiscard(local_id: string) {
-    await discardFailedAction(local_id);
-    setFailed(await getFailedActions());
+    if (!window.confirm('Have you reviewed this failed entry with HQ? Discarding it will be logged.')) return;
+    try { await discardFailedAction(local_id); setFailed(await getFailedActions()); }
+    catch (e) { window.alert(e instanceof Error ? e.message : 'Reconnect to record this review before discarding.'); }
   }
 
   if (online && pending === 0 && failed.length === 0) return null;

@@ -1,3 +1,4 @@
+import { setCashContext } from './offlineQueue';
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { supabase } from './supabaseClient';
 import type { AppUser } from './types';
@@ -54,6 +55,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setError(
           'Signed in, but your account record could not be loaded. Contact HQ if this persists.'
         );
+      } else if (!data.is_active) {
+        setAppUser(null); setCashContext(null); setError('This account is inactive. Contact HQ.');
       } else {
         setAppUser(data as AppUser);
       }
@@ -67,12 +70,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         return;
       }
-      void loadUser();
+      setTimeout(() => void loadUser(), 0);
     });
     return () => sub.subscription.unsubscribe();
   }, []);
 
   const signOut = async () => {
+    setCashContext(null);
     await supabase.auth.signOut();
     setAppUser(null);
     setError(null);

@@ -34,6 +34,10 @@ interface DigestShift {
 }
 
 interface AlertPayload {
+  _notification_id?: string;
+  failure_id?: string;
+  total_credits_received?: number;
+  credits_received?: number;
   type: 'shift_closed' | 'sync_failure' | 'shift_dispute' | 'daily_digest';
   outlet_id?: string | null;
   register_id?: string;
@@ -75,6 +79,8 @@ interface AlertPayload {
   shifts?: DigestShift[];
 }
 
+function escapeHtml(s: string): string { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!); }
+
 function money(n: number | undefined | null): string {
   return `₹${(n ?? 0).toFixed(2)}`;
 }
@@ -107,6 +113,7 @@ function shiftBreakdownHtml(
     <table cellpadding="4" style="border-collapse:collapse;margin-top:8px;">
       ${row('Opening balance', money(p.opening_balance))}
       ${row('Cash sales', money(p.cash_sales))}
+      ${row('Customer credits received', money(p.credits_received))}
       ${row('Cash collected (old bills)', money(p.cash_collected_old_bills))}
       ${row('Online received', money(p.online_received))}
       ${row('Expenses paid', `-${money(p.expenses_paid)}`)}
@@ -149,6 +156,7 @@ function digestHtml(p: AlertPayload, outletName: string): string {
     <h3 style="margin-bottom:4px;">Day totals</h3>
     <table cellpadding="4" style="border-collapse:collapse;">
       ${row('Cash sales', money(p.total_cash_sales))}
+      ${row('Customer credits received', money(p.total_credits_received))}
       ${row('Cash collected (old bills)', money(p.total_old_bills))}
       ${row('Online received', money(p.total_online))}
       ${row('Expenses paid', `-${money(p.total_expenses)}`)}
@@ -167,18 +175,18 @@ function digestHtml(p: AlertPayload, outletName: string): string {
   `;
 }
 
-async function sendResendEmail(to: string, subject: string, html: string): Promise<void> {
+async function sendResendEmail(to: string, subject: string, html: string, idempotencyKey?: string): Promise<void> {
   const apiKey = Deno.env.get('RESEND_API_KEY')!;
   const from = Deno.env.get('ALERT_FROM_EMAIL')!;
 
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
     body: JSON.stringify({ from, to, subject, html }),
   });
 
   if (!res.ok) {
-    console.error(`Resend send failed for ${to}:`, await res.text());
+    throw new Error(`Email provider rejected delivery (${res.status}): ${(await res.text()).slice(0, 300)}`);
   }
 }
 
@@ -195,13 +203,39 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  let notificationId: string | undefined;
   try {
     const payload = (await req.json()) as AlertPayload;
+    notificationId = payload._notification_id;
+    for (const key of ['shift_label', 'reason', 'error_message', 'table_name', 'created_at', 'closed_at', 'digest_date'] as const) {
+      if (typeof payload[key] === 'string') payload[key] = escapeHtml(payload[key]!);
+    }
+    payload.shifts = payload.shifts?.map((s) => ({ ...s, shift_label: s.shift_label ? escapeHtml(s.shift_label) : s.shift_label, closed_by_name: s.closed_by_name ? escapeHtml(s.closed_by_name) : s.closed_by_name }));
+    if (!['shift_closed', 'sync_failure', 'shift_dispute', 'daily_digest'].includes(payload.type)) throw new Error('Unsupported notification type');
 
     const admin = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     );
+
+    // Retry recipients independently. Provider idempotency also covers a lost success response.
+    async function sendTracked(to: string, subject: string, html: string) {
+      if (notificationId) {
+        const { data, error } = await admin.from('notification_deliveries').select('recipient').eq('notification_id', notificationId).eq('recipient', to).maybeSingle();
+        if (error) throw error;
+        if (data) return;
+      }
+      await sendResendEmail(to, subject, html, notificationId ? `${notificationId}:${to}` : undefined);
+      if (notificationId) {
+        const { error } = await admin.from('notification_deliveries').upsert({ notification_id: notificationId, recipient: to }, { onConflict: 'notification_id,recipient' });
+        if (error) throw error;
+      }
+    }
+    async function acknowledge() {
+      if (!notificationId) return;
+      const { error } = await admin.from('notification_outbox').update({ status: 'sent', sent_at: new Date().toISOString(), last_error: null }).eq('id', notificationId);
+      if (error) throw error;
+    }
 
     let outletName = 'Unknown outlet';
     if (payload.outlet_id) {
@@ -210,19 +244,20 @@ Deno.serve(async (req: Request) => {
         .select('name')
         .eq('id', payload.outlet_id)
         .single();
-      if (outlet) outletName = outlet.name;
+      if (outlet) outletName = escapeHtml(outlet.name);
     }
 
     // Recipients are the same list for every owner-facing alert type.
-    const { data: recipients } = await admin
+    const { data: recipients, error: recipientError } = await admin
       .from('alert_recipients')
       .select('email')
       .eq('is_active', true);
+    if (recipientError) throw recipientError;
     const ownerEmails = (recipients ?? []).map((r) => r.email as string);
 
     async function sendToOwners(subject: string, html: string): Promise<number> {
-      if (ownerEmails.length === 0) return 0;
-      await Promise.all(ownerEmails.map((e) => sendResendEmail(e, subject, html)));
+      if (ownerEmails.length === 0) throw new Error('No active alert recipients configured');
+      await Promise.all(ownerEmails.map((e) => sendTracked(e, subject, html)));
       return ownerEmails.length;
     }
 
@@ -233,7 +268,7 @@ Deno.serve(async (req: Request) => {
         .from('app_users')
         .select('id, full_name')
         .in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000']);
-      const nameById = new Map((users ?? []).map((u) => [u.id, u.full_name as string]));
+      const nameById = new Map((users ?? []).map((u) => [u.id, escapeHtml(u.full_name as string)]));
       const openedByName = nameById.get(payload.opened_by ?? '') ?? 'Unknown';
       const closedByName = nameById.get(payload.closed_by ?? '') ?? 'Unknown';
 
@@ -246,9 +281,10 @@ Deno.serve(async (req: Request) => {
 
       let employeeSent = false;
       if (payload.closed_by) {
-        const { data: closerAuth } = await admin.auth.admin.getUserById(payload.closed_by);
+        const { data: closerAuth, error: closerError } = await admin.auth.admin.getUserById(payload.closed_by);
+        if (closerError) throw closerError;
         if (closerAuth.user?.email) {
-          await sendResendEmail(
+          await sendTracked(
             closerAuth.user.email,
             `Your shift close confirmation — ${outletName}`,
             `<h2>Here's what you submitted</h2>${breakdown}
@@ -262,6 +298,7 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      await acknowledge();
       return new Response(JSON.stringify({ owner_sent: ownerSent, employee_sent: employeeSent }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -277,7 +314,7 @@ Deno.serve(async (req: Request) => {
           .select('full_name')
           .eq('id', payload.raised_by)
           .single();
-        if (u) raisedByName = u.full_name as string;
+        if (u) raisedByName = escapeHtml(u.full_name as string);
       }
 
       const { data: reg } = await admin
@@ -291,7 +328,7 @@ Deno.serve(async (req: Request) => {
         <p><strong>Outlet:</strong> ${outletName}</p>
         <p><strong>Raised by:</strong> ${raisedByName}</p>
         <p><strong>Raised at:</strong> ${payload.created_at ?? ''}</p>
-        ${reg?.shift_label ? `<p><strong>Shift:</strong> ${reg.shift_label}</p>` : ''}
+        ${reg?.shift_label ? `<p><strong>Shift:</strong> ${escapeHtml(reg.shift_label)}</p>` : ''}
         <p><strong>Originally closed at:</strong> ${reg?.closed_at ?? ''}</p>
         <table cellpadding="4" style="border-collapse:collapse;margin-top:8px;">
           ${row('As recorded — expected', money(reg?.expected_closing))}
@@ -308,6 +345,7 @@ Deno.serve(async (req: Request) => {
       `;
 
       const sent = await sendToOwners(`Shift close disputed — ${outletName}`, html);
+      await acknowledge();
       return new Response(JSON.stringify({ sent }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -321,6 +359,7 @@ Deno.serve(async (req: Request) => {
           ? `Daily digest — ${outletName} (${payload.mismatch_count} mismatch${(payload.mismatch_count ?? 0) === 1 ? '' : 'es'})`
           : `Daily digest — ${outletName}`;
       const sent = await sendToOwners(subject, digestHtml(payload, outletName));
+      await acknowledge();
       return new Response(JSON.stringify({ sent }), {
         status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -337,19 +376,21 @@ Deno.serve(async (req: Request) => {
     `;
     const sent = await sendToOwners(`Sync failure at ${outletName}`, html);
 
-    if (payload.table_name && payload.created_at) {
-      await admin
-        .from('sync_failures')
-        .update({ notified: true })
-        .eq('table_name', payload.table_name)
-        .eq('created_at', payload.created_at);
+    if (payload.failure_id) {
+      const { error } = await admin.from('sync_failures').update({ notified: true }).eq('id', payload.failure_id);
+      if (error) throw error;
     }
 
+    await acknowledge();
     return new Response(JSON.stringify({ sent }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (err) {
+    if (notificationId) {
+      const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+      await admin.from('notification_outbox').update({ last_error: err instanceof Error ? err.message : 'Delivery failed' }).eq('id', notificationId);
+    }
     console.error('send-alert error:', err);
     return new Response(
       JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error' }),

@@ -7,6 +7,7 @@ const TYPE_STYLES: Record<RegisterEntry['entry_type'], string> = {
   deposit: 'bg-purple-50 text-purple-700',
   return: 'bg-red-50 text-red-700',
   credit_refund: 'bg-orange-50 text-orange-700',
+  credit_received: 'bg-teal-50 text-teal-700',
 };
 
 export default function EntriesTable({ entries }: { entries: RegisterEntry[] }) {

@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { createReturn, findBillBySerial, getReturnedSoFar } from '../lib/returnsService';
-import { supabase } from '../lib/supabaseClient';
+import ReturnApprovals from '../components/ReturnApprovals';
 import { useAuth } from '../lib/AuthContext';
-import type { AppUser, Bill } from '../lib/types';
+import type { Bill } from '../lib/types';
 
 export default function Returns() {
   const { appUser } = useAuth();
@@ -12,8 +12,6 @@ export default function Returns() {
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [stockReversed, setStockReversed] = useState(true);
-  const [approvers, setApprovers] = useState<AppUser[]>([]);
-  const [approverId, setApproverId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
@@ -21,16 +19,6 @@ export default function Returns() {
   const remaining = bill ? bill.amount_paid - returnedSoFar : 0;
   const overLimit = amount !== '' && Number(amount) > remaining;
   const notPositive = amount !== '' && Number(amount) <= 0;
-
-  useEffect(() => {
-    if (!appUser?.outlet_id) return;
-    void supabase
-      .from('app_users')
-      .select('*')
-      .eq('outlet_id', appUser.outlet_id)
-      .in('role', ['manager', 'hq'])
-      .then(({ data }) => setApprovers((data as AppUser[]) ?? []));
-  }, [appUser?.outlet_id]);
 
   async function handleLookup() {
     if (!appUser?.outlet_id || !billSerial) return;
@@ -46,7 +34,7 @@ export default function Returns() {
   }
 
   async function handleSubmit() {
-    if (!appUser?.outlet_id || !bill || !amount || !reason || !approverId) return;
+    if (!appUser?.outlet_id || !bill || !amount || !reason) return;
     if (notPositive) {
       setError('Return amount must be greater than zero');
       return;
@@ -64,7 +52,6 @@ export default function Returns() {
         amountReturned: Number(amount),
         reason,
         stockReversed,
-        approvedBy: approverId,
         createdBy: appUser.id,
       });
       setDone(true);
@@ -78,8 +65,8 @@ export default function Returns() {
   if (done) {
     return (
       <div className="max-w-md mx-auto mt-12 bg-white rounded-xl shadow p-8 text-center">
-        <h2 className="text-xl font-semibold text-green-700 mb-2">Return recorded</h2>
-        <p className="text-slate-500 mb-6">The original bill was not changed.</p>
+        <h2 className="text-xl font-semibold text-green-700 mb-2">Return request saved</h2>
+        <p className="text-slate-500 mb-6">After sync, a manager or HQ must approve this request. Do not pay out the refund until approved.</p>
         <button
           onClick={() => {
             setDone(false);
@@ -98,7 +85,8 @@ export default function Returns() {
 
   return (
     <div className="max-w-md mx-auto bg-white rounded-xl shadow p-6">
-      <h2 className="text-lg font-semibold text-slate-800 mb-4">Sales Return</h2>
+      <ReturnApprovals />
+      <h2 className="text-lg font-semibold text-slate-800 mb-4 mt-6">Sales Return</h2>
 
       <label className="block text-sm font-medium text-slate-700 mb-1">Original bill serial</label>
       <div className="flex gap-2 mb-4">
@@ -160,28 +148,16 @@ export default function Returns() {
             Stock has been put back
           </label>
 
-          <label className="block text-sm font-medium text-slate-700 mb-1">Approved by</label>
-          <select
-            className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4"
-            value={approverId}
-            onChange={(e) => setApproverId(e.target.value)}
-          >
-            <option value="">Select manager…</option>
-            {approvers.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.full_name}
-              </option>
-            ))}
-          </select>
+          <p className="text-sm text-amber-800 mb-4">Submit for manager/HQ approval. Cash is deducted only when they approve and confirm the refund from their own account.</p>
 
           {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
 
           <button
-            disabled={!amount || !reason || !approverId || overLimit || notPositive || submitting}
+            disabled={!amount || !reason || overLimit || notPositive || submitting}
             onClick={() => void handleSubmit()}
             className="w-full bg-slate-800 text-white font-medium rounded-lg py-3 disabled:opacity-40"
           >
-            {submitting ? 'Saving…' : 'Record Return'}
+            {submitting ? 'Saving…' : 'Request Return'}
           </button>
         </>
       )}

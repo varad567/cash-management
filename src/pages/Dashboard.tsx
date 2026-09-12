@@ -72,6 +72,7 @@ export default function Dashboard({ register: initialRegister }: Props) {
         <p className="text-xs text-slate-400 mb-4">Updated {lastUpdated.toLocaleTimeString()}</p>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <Stat label="Opening balance" value={register.opening_balance} />
+          <Stat label="Customer credits received" value={register.credits_received ?? 0} />
           <Stat label="Cash sales" value={register.cash_sales} />
           <Stat label="Old-bill collections" value={register.cash_collected_old_bills} />
           <Stat label="Online received" value={register.online_received} />

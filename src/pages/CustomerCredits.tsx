@@ -61,7 +61,7 @@ export default function CustomerCredits() {
         setError('No bill found with that serial at this outlet');
         return;
       }
-      await applyCreditToBill(creditId, bill.id, appUser.id);
+      await applyCreditToBill(creditId, bill.id);
       setUsingCreditId(null);
       setBillSerial('');
       await refresh();

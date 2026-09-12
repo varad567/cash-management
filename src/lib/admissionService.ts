@@ -32,10 +32,7 @@ export async function registerAdmission(params: RegisterAdmissionParams) {
 // the button visually doing nothing in between. Requires the device
 // to be online, same as opening/closing a shift.
 export async function dischargePatient(admissionId: string) {
-  const { error } = await supabase
-    .from('admissions')
-    .update({ status: 'discharged', discharged_at: new Date().toISOString() })
-    .eq('id', admissionId);
+  const { error } = await supabase.rpc('discharge_cash_patient', { p_admission_id: admissionId });
   if (error) throw error;
 }
 

@@ -1,4 +1,4 @@
-import { queueAction } from './offlineQueue';
+import { queueAction, runCashAction } from './offlineQueue';
 import { supabase } from './supabaseClient';
 
 export type CreditStatus = 'held' | 'adjusted' | 'refunded';
@@ -49,19 +49,9 @@ export async function getHeldCredits(outletId: string): Promise<CustomerCredit[]
 // balance atomically via the DB function and should surface success
 // or a cap violation immediately, the same reasoning as approvals
 // and discharge elsewhere in this app.
-export async function applyCreditToBill(creditId: string, billId: string, usedBy: string) {
-  const { error } = await supabase.rpc('use_customer_credit', {
-    p_credit_id: creditId,
-    p_bill_id: billId,
-    p_used_by: usedBy,
-  });
-  if (error) throw error;
+export async function applyCreditToBill(creditId: string, billId: string) {
+  return runCashAction('credit_apply', { credit_id: creditId, bill_id: billId });
 }
-
 export async function refundCredit(creditId: string) {
-  const { error } = await supabase
-    .from('customer_credits')
-    .update({ status: 'refunded' })
-    .eq('id', creditId);
-  if (error) throw error;
+  return runCashAction('credit_refund', { credit_id: creditId });
 }

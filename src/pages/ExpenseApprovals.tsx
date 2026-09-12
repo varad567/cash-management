@@ -24,7 +24,7 @@ export default function ExpenseApprovals() {
     setApprovingId(expenseId);
     setError(null);
     try {
-      await approveExpense(expenseId, appUser.id);
+      await approveExpense(expenseId);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not approve expense');

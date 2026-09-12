@@ -12,6 +12,11 @@ const base = {
 };
 
 describe('computeExpectedClosing', () => {
+  it('includes credit receipts and subtracts refunds from available drawer cash', () => {
+    expect(computeExpectedClosing({
+      ...base, opening_balance: 1000, credits_received: 400, credits_refunded: 150,
+    })).toBe(1250);
+  });
   it('returns just the opening balance when nothing else happened', () => {
     expect(computeExpectedClosing({ ...base, opening_balance: 500 })).toBe(500);
   });

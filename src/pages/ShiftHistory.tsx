@@ -1,3 +1,4 @@
+import DenominationCounter from '../components/DenominationCounter';
 import { useEffect, useState } from 'react';
 import { getClosedRegisters, type ShiftRegisterReadable } from '../lib/shiftHistoryService';
 import { getRegisterEntries, type RegisterEntry } from '../lib/registerEntriesService';
@@ -50,6 +51,10 @@ export default function ShiftHistory() {
           <p className={`text-xl font-bold mt-2 ${mismatch === 0 ? 'text-green-600' : 'text-red-600'}`}>
             {mismatch === 0 ? 'Matched ✓' : `Mismatch: ₹${mismatch.toFixed(2)}`}
           </p>
+        </div>
+        <div className="bg-white rounded-xl shadow p-6 grid md:grid-cols-2 gap-4">
+          {selected.opening_denominations ? <DenominationCounter label="Opening cash count" value={selected.opening_denominations} /> : <p>No denomination counts recorded for this older opening.</p>}
+          {selected.closing_denominations ? <DenominationCounter label="Closing cash count" value={selected.closing_denominations} /> : <p>No denomination counts recorded for this older closing.</p>}
         </div>
         <div className="bg-white rounded-xl shadow p-6">
           <div className="flex justify-between items-center mb-4">

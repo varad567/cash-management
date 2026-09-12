@@ -1,3 +1,5 @@
+import DenominationCounter from '../components/DenominationCounter';
+import { denominationTotal, type CashDenominations } from '../lib/cashDenominations';
 import { useEffect, useState } from 'react';
 import { getLastClosedRegister, openShift } from '../lib/shiftService';
 import { useAuth } from '../lib/AuthContext';
@@ -10,7 +12,9 @@ interface Props {
 export default function ShiftOpen({ onShiftOpened }: Props) {
   const { appUser } = useAuth();
   const [prevRegister, setPrevRegister] = useState<ShiftRegister | null>(null);
-  const [confirmedAmount, setConfirmedAmount] = useState('');
+  const [denominations, setDenominations] = useState<CashDenominations>({});
+  const [confirmed, setConfirmed] = useState(false);
+  const confirmedAmount = denominationTotal(denominations);
   const [shiftLabel, setShiftLabel] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -20,11 +24,12 @@ export default function ShiftOpen({ onShiftOpened }: Props) {
     if (!appUser?.outlet_id) return;
     getLastClosedRegister(appUser.outlet_id)
       .then(setPrevRegister)
+      .catch((err) => setError(err.message ?? 'Could not load handover'))
       .finally(() => setLoading(false));
   }, [appUser?.outlet_id]);
 
   const expectedHandover = prevRegister?.counted_closing ?? 0;
-  const matches = confirmedAmount !== '' && Number(confirmedAmount) === expectedHandover;
+  const matches = confirmed && (!prevRegister || confirmedAmount === expectedHandover);
 
   async function handleSubmit() {
     if (!appUser?.outlet_id || !matches) return;
@@ -33,7 +38,7 @@ export default function ShiftOpen({ onShiftOpened }: Props) {
     try {
       const register = await openShift({
         outletId: appUser.outlet_id,
-        openedBy: appUser.id,
+        denominations: Object.keys(denominations).length ? denominations : { "1": 0 },
         shiftLabel: shiftLabel || undefined,
       });
       onShiftOpened(register);
@@ -65,25 +70,9 @@ export default function ShiftOpen({ onShiftOpened }: Props) {
           </div>
         )}
 
-        <label className="block text-sm font-medium text-slate-700 mb-1">
-          Count the drawer now — enter the amount
-        </label>
-        <input
-          type="number"
-          inputMode="decimal"
-          min="0"
-          step="0.01"
-          className="w-full text-lg border border-slate-300 rounded-lg px-4 py-3 mb-1"
-          value={confirmedAmount}
-          onChange={(e) => setConfirmedAmount(e.target.value)}
-          placeholder="0.00"
-        />
-        {confirmedAmount !== '' && !matches && (
-          <p className="text-sm text-red-600 mb-4">
-            This doesn't match the previous shift's closing amount (₹{expectedHandover.toFixed(2)}).
-            Recount before continuing — if it's genuinely different, get your manager.
-          </p>
-        )}
+        <DenominationCounter label="Opening cash count" value={denominations} onChange={(v) => { setDenominations(v); setConfirmed(false); }} />
+        <label className="flex gap-2 text-sm mb-3"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />I counted and confirm these quantities, including any zero balance.</label>
+        {prevRegister && confirmedAmount !== expectedHandover && <p className="text-sm text-red-600">This count must match the previous closing amount. Recount or contact your manager.</p>}
 
         <label className="block text-sm font-medium text-slate-700 mt-4 mb-1">
           Shift label (optional)
@@ -99,7 +88,7 @@ export default function ShiftOpen({ onShiftOpened }: Props) {
         {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
 
         <button
-          disabled={!matches || submitting}
+          disabled={!matches || submitting || loading}
           onClick={() => void handleSubmit()}
           className="w-full bg-slate-800 text-white text-lg font-medium rounded-lg py-3 disabled:opacity-40"
         >
