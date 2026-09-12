@@ -1,3 +1,4 @@
+import { businessDate } from './cashDenominations';
 import { queueAction } from './offlineQueue';
 import { supabase } from './supabaseClient';
 import type { Bill } from './types';
@@ -40,13 +41,10 @@ interface CreateReturnParams {
   amountReturned: number;
   reason: string;
   stockReversed: boolean;
-  approvedBy: string; // must be a manager/hq app_user id — re-checked server-side
   createdBy: string;
 }
 
-// Never edits the original bill — logs a separate event. The DB
-// trigger independently re-verifies approvedBy's role, so a tampered
-// or stale client request is still rejected.
+// Queues a return request; cash moves only after a manager or HQ approves it.
 export async function createReturn(params: CreateReturnParams) {
   return queueAction('returns', 'insert', {
     outlet_id: params.outletId,
@@ -54,8 +52,7 @@ export async function createReturn(params: CreateReturnParams) {
     amount_returned: params.amountReturned,
     reason: params.reason,
     stock_reversed: params.stockReversed,
-    approved_by: params.approvedBy,
-    register_date: new Date().toISOString().slice(0, 10),
+    register_date: businessDate(),
     created_by: params.createdBy,
   });
 }

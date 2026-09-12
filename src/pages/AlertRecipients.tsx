@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabaseClient';
 import type { AlertRecipient } from '../lib/types';
+import NotificationStatus from '../components/NotificationStatus';
 
 export default function AlertRecipients() {
   const [recipients, setRecipients] = useState<AlertRecipient[]>([]);
@@ -87,6 +88,7 @@ export default function AlertRecipients() {
 
   return (
     <div className="max-w-2xl mx-auto p-4">
+      <NotificationStatus />
       <div className="flex justify-between items-center mb-1">
         <h2 className="text-lg font-semibold text-slate-800">Alert Recipients</h2>
         <button

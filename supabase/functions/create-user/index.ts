@@ -52,11 +52,11 @@ Deno.serve(async (req: Request) => {
 
     const { data: callerAppUser } = await callerClient
       .from('app_users')
-      .select('role')
+      .select('role, is_active')
       .eq('id', callerAuthUser.id)
       .single();
 
-    if (callerAppUser?.role !== 'hq') {
+    if (callerAppUser?.role !== 'hq' || !callerAppUser.is_active) {
       return new Response(JSON.stringify({ error: 'Only HQ can create users' }), {
         status: 403,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },

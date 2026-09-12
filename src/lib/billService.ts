@@ -1,91 +1,26 @@
+import { validateSplit, toPaise } from './cashDenominations';
 import { queueAction } from './offlineQueue';
 import { supabase } from './supabaseClient';
 import type { Bill, BillStatus, BillType, PaymentMode } from './types';
 
-interface CreateWalkInSaleParams {
-  outletId: string;
-  billSerial: string;
-  billAmount: number;
-  mode: PaymentMode;
-  gatewayReference?: string;
-  createdBy: string;
+export interface CreateSaleParams {
+  outletId: string; billSerial: string; billType: BillType; admissionId: string | null;
+  billAmount: number; cashAmount: number; onlineAmount: number; gatewayReference?: string;
 }
-
-// Walk-in bills must be paid in full — bill + payment are created in
-// one atomic DB transaction (see migration 0009). Do NOT use
-// createBill + recordPayment for walk-ins: two separate inserts can
-// never satisfy the full-payment constraint, since the bill would
-// briefly exist with balance_due > 0 before the payment attaches.
-export async function createWalkInSale(params: CreateWalkInSaleParams) {
-  if (params.mode === 'online' && !params.gatewayReference) {
-    throw new Error('Online payments require a gateway reference');
-  }
-  return queueAction('record_walk_in_sale', 'rpc', {
-    p_outlet_id: params.outletId,
-    p_bill_serial: params.billSerial,
-    p_bill_amount: params.billAmount,
-    p_payment_amount: params.billAmount, // walk-in: payment must equal the bill in full
-    p_payment_mode: params.mode,
-    p_gateway_reference: params.gatewayReference ?? null,
-    p_created_by: params.createdBy,
-  });
+export async function createSale(p: CreateSaleParams) {
+  validateSplit(p.billAmount, p.cashAmount, p.onlineAmount, p.billType === 'walk_in', p.gatewayReference ?? '');
+  return queueAction('sale', 'rpc', { outlet_id: p.outletId, bill_serial: p.billSerial.trim(),
+    bill_type: p.billType, admission_id: p.admissionId, bill_amount: p.billAmount,
+    cash_amount: p.cashAmount, online_amount: p.onlineAmount, gateway_reference: p.gatewayReference?.trim() || null });
 }
-
-interface CreateBillParams {
-  outletId: string;
-  billSerial: string;
-  billType: BillType;
-  admissionId: string | null;
-  billAmount: number;
-  createdBy: string;
-}
-
-// Only for admitted-patient bills, which are allowed to carry a
-// balance — walk-in sales must use createWalkInSale instead (see
-// migration 0009 for why the two-step insert doesn't work for those).
-//
-// Returns the bill's id (client-generated, not the offline-queue
-// local_id) so a same-screen payment can reference it immediately —
-// bills.id has no other default that would collide, so supplying it
-// client-side works identically online and offline, and the payment
-// insert doesn't need to wait for the bill to actually sync first.
-export async function createBill(params: CreateBillParams): Promise<string> {
-  const billId = crypto.randomUUID();
-  await queueAction('bills', 'insert', {
-    id: billId,
-    outlet_id: params.outletId,
-    bill_serial: params.billSerial,
-    bill_type: params.billType,
-    admission_id: params.admissionId,
-    bill_amount: params.billAmount,
-    register_date: new Date().toISOString().slice(0, 10),
-    created_by: params.createdBy,
-  });
-  return billId;
-}
-
 interface RecordPaymentParams {
-  billId: string;
-  outletId: string;
-  amount: number;
-  mode: PaymentMode;
-  gatewayReference?: string;
-  receivedBy: string;
+  billId: string; outletId: string; amount: number; mode: PaymentMode; gatewayReference?: string; receivedBy: string;
 }
-
-export async function recordPayment(params: RecordPaymentParams) {
-  if (params.mode === 'online' && !params.gatewayReference) {
-    throw new Error('Online payments require a gateway reference');
-  }
-  return queueAction('payments', 'insert', {
-    bill_id: params.billId,
-    outlet_id: params.outletId,
-    amount: params.amount,
-    mode: params.mode,
-    gateway_reference: params.gatewayReference ?? null,
-    register_date: new Date().toISOString().slice(0, 10),
-    received_by: params.receivedBy,
-  });
+export async function recordPayment(p: RecordPaymentParams) {
+  if (toPaise(p.amount) <= 0) throw new Error('Payment must be greater than zero.');
+  if (p.mode === 'online' && !p.gatewayReference?.trim()) throw new Error('Online payments require a reference.');
+  return queueAction('payments', 'insert', { bill_id: p.billId, outlet_id: p.outletId, amount: p.amount,
+    mode: p.mode, gateway_reference: p.gatewayReference?.trim() || null, received_by: p.receivedBy });
 }
 
 // Admitted-patient bills carrying a balance from an earlier shift —

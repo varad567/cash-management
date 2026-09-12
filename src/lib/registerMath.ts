@@ -9,7 +9,7 @@ type RegisterTotals = Pick<
   | 'deposits_made'
   | 'cash_returned'
   | 'credits_refunded'
->;
+> & { credits_received?: number };
 
 // The core reconciliation formula. Previously duplicated three times
 // (shiftService.closeShift, ShiftClose.tsx, Dashboard.tsx) — any
@@ -18,6 +18,7 @@ type RegisterTotals = Pick<
 export function computeExpectedClosing(r: RegisterTotals): number {
   return (
     r.opening_balance +
+    (r.credits_received ?? 0) +
     r.cash_sales +
     r.cash_collected_old_bills -
     r.expenses_paid -

@@ -1,262 +1,54 @@
 import { useEffect, useState } from 'react';
-import { createBill, createWalkInSale, recordPayment } from '../lib/billService';
-import { billSerialExists } from '../lib/returnsService';
+import { createSale } from '../lib/billService';
 import { getActiveAdmissions } from '../lib/admissionService';
+import { validateSplit } from '../lib/cashDenominations';
 import { useAuth } from '../lib/AuthContext';
-import type { Admission, BillType, PaymentMode } from '../lib/types';
-
+import type { Admission, BillType } from '../lib/types';
 export default function NewBill() {
   const { appUser } = useAuth();
   const [billType, setBillType] = useState<BillType>('walk_in');
   const [admissions, setAdmissions] = useState<Admission[]>([]);
   const [admissionId, setAdmissionId] = useState('');
-  const [billSerial, setBillSerial] = useState('');
-  const [billAmount, setBillAmount] = useState('');
-  const [paymentAmount, setPaymentAmount] = useState('');
-  const [mode, setMode] = useState<PaymentMode>('cash');
-  const [gatewayRef, setGatewayRef] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [serial, setSerial] = useState('');
+  const [amount, setAmount] = useState('');
+  const [cash, setCash] = useState('');
+  const [online, setOnline] = useState('');
+  const [reference, setReference] = useState('');
+  const [method, setMethod] = useState<'cash' | 'online' | 'split'>('cash');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const [done, setDone] = useState(false);
-
   useEffect(() => {
-    if (billType === 'admitted_patient' && appUser?.outlet_id) {
-      void getActiveAdmissions(appUser.outlet_id).then(setAdmissions);
-    }
+    if (billType === 'admitted_patient' && appUser?.outlet_id) void getActiveAdmissions(appUser.outlet_id).then(setAdmissions).catch((e) => setError(e.message));
   }, [billType, appUser?.outlet_id]);
-
-  // Walk-in bills must be collected in full — the amount field is
-  // locked to the bill total; only admitted-patient bills allow a
-  // partial amount. This mirrors the DB constraint (chk_carry_forward)
-  // so the cashier sees the rule up front instead of hitting an error.
-  const effectivePayment = billType === 'walk_in' ? billAmount : paymentAmount;
-
-  async function handleSubmit() {
-    if (!appUser?.outlet_id || !billAmount || !billSerial) return;
-    const trimmedSerial = billSerial.trim();
-    if (!trimmedSerial) {
-      setError('Enter a bill number');
-      return;
-    }
-    if (Number(billAmount) <= 0) {
-      setError('Bill amount must be greater than zero');
-      return;
-    }
-    if (paymentAmount && Number(paymentAmount) < 0) {
-      setError('Payment amount cannot be negative');
-      return;
-    }
-    if (billType === 'admitted_patient' && paymentAmount && Number(paymentAmount) > Number(billAmount)) {
-      setError('Payment now cannot exceed the bill amount for a brand-new bill');
-      return;
-    }
-    if (billType === 'admitted_patient' && !admissionId) {
-      setError('Select the patient admission this bill belongs to');
-      return;
-    }
-    setSubmitting(true);
-    setError(null);
+  const isWalkIn = billType === 'walk_in';
+  const cashAmount = method === 'online' ? 0 : Number(isWalkIn && method === 'cash' ? amount : cash || 0);
+  const onlineAmount = method === 'cash' ? 0 : Number(isWalkIn && method === 'online' ? amount : online || 0);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault(); if (!appUser?.outlet_id) return;
+    setError(''); setBusy(true);
     try {
-      // Duplicate check needs a live query — only run it when online.
-      // If offline, there's nothing to check against yet, so the bill
-      // still queues normally; a genuine duplicate is caught by the
-      // offline queue's permanent-failure handling once it syncs
-      // (see OfflineIndicator) rather than blocking offline entry
-      // entirely.
-      if (navigator.onLine) {
-        try {
-          if (await billSerialExists(appUser.outlet_id, trimmedSerial)) {
-            setError('A bill with this number already exists at this outlet — check for a duplicate entry.');
-            setSubmitting(false);
-            return;
-          }
-        } catch {
-          // Connection dropped mid-check — fall through to the same
-          // offline-safe path rather than blocking the cashier here.
-        }
-      }
-
-      if (billType === 'walk_in') {
-        // Walk-in: bill + full payment must be created atomically —
-        // see billService.createWalkInSale for why the two-step flow
-        // used for admitted patients can't be used here.
-        if (mode === 'online' && !gatewayRef) {
-          setError('Enter the gateway reference for an online payment');
-          setSubmitting(false);
-          return;
-        }
-        await createWalkInSale({
-          outletId: appUser.outlet_id,
-          billSerial: trimmedSerial,
-          billAmount: Number(billAmount),
-          mode,
-          gatewayReference: mode === 'online' ? gatewayRef : undefined,
-          createdBy: appUser.id,
-        });
-        setDone(true);
-        return;
-      }
-
-      const billId = await createBill({
-        outletId: appUser.outlet_id,
-        billSerial: trimmedSerial,
-        billType,
-        admissionId: admissionId,
-        billAmount: Number(billAmount),
-        createdBy: appUser.id,
-      });
-
-      if (effectivePayment && Number(effectivePayment) > 0) {
-        await recordPayment({
-          billId,
-          outletId: appUser.outlet_id,
-          amount: Number(effectivePayment),
-          mode,
-          gatewayReference: mode === 'online' ? gatewayRef : undefined,
-          receivedBy: appUser.id,
-        });
-      }
+      validateSplit(Number(amount), cashAmount, onlineAmount, isWalkIn, reference);
+      if (!serial.trim() || (!isWalkIn && !admissionId)) throw new Error('Enter a bill number and select the admission if applicable.');
+      await createSale({ outletId: appUser.outlet_id, billSerial: serial, billType, admissionId: isWalkIn ? null : admissionId,
+        billAmount: Number(amount), cashAmount, onlineAmount, gatewayReference: reference });
       setDone(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create bill');
-    } finally {
-      setSubmitting(false);
-    }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save bill'); } finally { setBusy(false); }
   }
-
-  if (done) {
-    return (
-      <div className="max-w-md mx-auto mt-12 bg-white rounded-xl shadow p-8 text-center">
-        <h2 className="text-xl font-semibold text-green-700 mb-2">Bill recorded</h2>
-        <p className="text-slate-500 mb-6">Serial {billSerial}</p>
-        <button
-          onClick={() => {
-            setDone(false);
-            setBillSerial('');
-            setBillAmount('');
-            setPaymentAmount('');
-            setAdmissionId('');
-          }}
-          className="bg-slate-800 text-white rounded-lg py-3 px-6 font-medium"
-        >
-          New Bill
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-md mx-auto bg-white rounded-xl shadow p-6">
-      <h2 className="text-lg font-semibold text-slate-800 mb-4">New Bill</h2>
-
-      <div className="flex gap-2 mb-4">
-        <button
-          onClick={() => setBillType('walk_in')}
-          className={`flex-1 py-3 rounded-lg font-medium ${billType === 'walk_in' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}`}
-        >
-          Walk-in
-        </button>
-        <button
-          onClick={() => setBillType('admitted_patient')}
-          className={`flex-1 py-3 rounded-lg font-medium ${billType === 'admitted_patient' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}`}
-        >
-          Admitted Patient
-        </button>
-      </div>
-
-      {billType === 'admitted_patient' && (
-        <>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Patient</label>
-          <select
-            className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4"
-            value={admissionId}
-            onChange={(e) => setAdmissionId(e.target.value)}
-          >
-            <option value="">Select patient…</option>
-            {admissions.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.patient_name} {a.ward_bed ? `(${a.ward_bed})` : ''}
-              </option>
-            ))}
-          </select>
-        </>
-      )}
-
-      <label className="block text-sm font-medium text-slate-700 mb-1">Bill serial</label>
-      <input
-        className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4"
-        value={billSerial}
-        onChange={(e) => setBillSerial(e.target.value)}
-        placeholder="From POS"
-      />
-
-      <label className="block text-sm font-medium text-slate-700 mb-1">Bill amount</label>
-      <input
-        type="number"
-        inputMode="decimal"
-        min="0"
-        step="0.01"
-        className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4"
-        value={billAmount}
-        onChange={(e) => setBillAmount(e.target.value)}
-        placeholder="0.00"
-      />
-
-      {billType === 'admitted_patient' && (
-        <>
-          <label className="block text-sm font-medium text-slate-700 mb-1">
-            Amount being paid now (leave blank if none)
-          </label>
-          <input
-            type="number"
-            inputMode="decimal"
-            min="0"
-            step="0.01"
-            className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4"
-            value={paymentAmount}
-            onChange={(e) => setPaymentAmount(e.target.value)}
-            placeholder="0.00"
-          />
-        </>
-      )}
-
-      {Number(effectivePayment) > 0 && (
-        <>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Payment mode</label>
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => setMode('cash')}
-              className={`flex-1 py-2 rounded-lg font-medium ${mode === 'cash' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}`}
-            >
-              Cash
-            </button>
-            <button
-              onClick={() => setMode('online')}
-              className={`flex-1 py-2 rounded-lg font-medium ${mode === 'online' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-600'}`}
-            >
-              Online
-            </button>
-          </div>
-          {mode === 'online' && (
-            <input
-              className="w-full border border-slate-300 rounded-lg px-4 py-3 mb-4"
-              value={gatewayRef}
-              onChange={(e) => setGatewayRef(e.target.value)}
-              placeholder="Gateway reference"
-            />
-          )}
-        </>
-      )}
-
-      {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
-
-      <button
-        disabled={submitting || !billAmount || !billSerial}
-        onClick={() => void handleSubmit()}
-        className="w-full bg-slate-800 text-white font-medium rounded-lg py-3 disabled:opacity-40"
-      >
-        {submitting ? 'Saving…' : 'Save Bill'}
-      </button>
-    </div>
-  );
+  const input = 'w-full border border-slate-300 rounded-lg px-3 py-3';
+  if (done) return <div className="max-w-lg mx-auto bg-white p-6 rounded-xl space-y-4"><h2 className="text-xl font-semibold">Bill saved on this device</h2><p>Bill {serial} is queued for sync. Check the sync indicator for confirmation or errors before closing.</p><button className="underline" onClick={() => { setDone(false); setSerial(''); setAmount(''); setCash(''); setOnline(''); setReference(''); }}>Record another bill</button></div>;
+  return <form onSubmit={(e) => void submit(e)} className="max-w-lg mx-auto bg-white p-6 rounded-xl shadow space-y-4">
+    <h1 className="text-xl font-semibold">Record Bill</h1>
+    <label className="block">Bill type<select className={input} value={billType} onChange={(e) => setBillType(e.target.value as BillType)}><option value="walk_in">Walk-in</option><option value="admitted_patient">Admitted patient</option></select></label>
+    {!isWalkIn && <label className="block">Admission<select required className={input} value={admissionId} onChange={(e) => setAdmissionId(e.target.value)}><option value="">Select admission</option>{admissions.map((a) => <option key={a.id} value={a.id}>{a.patient_name} {a.ward_bed}</option>)}</select></label>}
+    <label className="block">Bill number from billing software<input required className={input} value={serial} onChange={(e) => setSerial(e.target.value)} /></label>
+    <label className="block">Bill amount (₹)<input required type="number" min="0.01" step="0.01" className={input} value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
+    <label className="block">Payment method<select className={input} value={method} onChange={(e) => setMethod(e.target.value as typeof method)}><option value="cash">Cash</option><option value="online">Online</option><option value="split">Cash + online</option></select></label>
+    {(method === 'split' || (!isWalkIn && method === 'cash')) && <label className="block">Cash received (₹)<input type="number" min="0" step="0.01" className={input} value={cash} onChange={(e) => setCash(e.target.value)} /></label>}
+    {(method === 'split' || (!isWalkIn && method === 'online')) && <label className="block">Online received (₹)<input type="number" min="0" step="0.01" className={input} value={online} onChange={(e) => setOnline(e.target.value)} /></label>}
+    {method !== 'cash' && <label className="block">Online transaction reference<input required={onlineAmount > 0} className={input} value={reference} onChange={(e) => setReference(e.target.value)} /></label>}
+    <div className="bg-slate-50 p-3 rounded text-sm">Cash ₹{cashAmount.toFixed(2)} + online ₹{onlineAmount.toFixed(2)} = ₹{(cashAmount + onlineAmount).toFixed(2)}<br />{isWalkIn ? 'The combined payment must equal the full bill amount.' : `Remaining balance: ₹${(Number(amount || 0) - cashAmount - onlineAmount).toFixed(2)}`}</div>
+    {error && <p role="alert" className="text-red-700">{error}</p>}
+    <button disabled={busy} className="w-full bg-slate-800 text-white py-3 rounded-lg disabled:opacity-40">{busy ? 'Saving…' : 'Save bill and payment'}</button>
+  </form>;
 }

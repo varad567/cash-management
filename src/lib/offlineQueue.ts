@@ -1,252 +1,102 @@
 import { supabase } from './supabaseClient';
+import { businessDate } from './cashDenominations';
 import type { QueuedAction } from './types';
-
-const DB_NAME = 'cash_mgmt_offline';
-const STORE_NAME = 'queued_actions';
-const DB_VERSION = 1;
-
-// Postgres error codes (and the SQLSTATE Postgres uses for a plain
-// `raise exception` in a trigger/function, P0001) that mean the
-// write is fundamentally invalid — retrying with the exact same
-// payload will fail identically every time. Anything else (network
-// drop, a momentary RLS mismatch, a foreign key waiting on a
-// still-unsynced row) is left retryable, since it may genuinely
-// resolve on its own.
-const PERMANENT_ERROR_CODES = new Set([
-  '23505', // unique_violation — e.g. a bill serial that already exists
-  '23514', // check_violation — e.g. a negative amount slipping past client validation
-  'P0001', // raise exception — every custom business-rule check in this schema
-]);
-
-function isPermanentError(code: string | undefined): boolean {
-  return !!code && PERMANENT_ERROR_CODES.has(code);
+const DB_NAME = 'cash_mgmt_offline', STORE_NAME = 'queued_actions';
+const PERMANENT_CODES = new Set(['23505', '23514', '22P02', 'P0001', '42501']);
+interface CashContext { actorId: string; outletId: string; registerId: string; }
+let context: CashContext | null = null;
+export function setCashContext(value: CashContext | null) { context = value; }
+async function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => { if (!request.result.objectStoreNames.contains(STORE_NAME)) request.result.createObjectStore(STORE_NAME, { keyPath: 'local_id' }); };
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
 }
-
-// Stable per-browser device id, used to detect duplicate syncs
-function getDeviceId(): string {
-  let id = localStorage.getItem('device_id');
-  if (!id) {
-    id = crypto.randomUUID();
-    localStorage.setItem('device_id', id);
-  }
+async function readActions(): Promise<QueuedAction[]> {
+  const db = await openDb();
+  try { return await new Promise((resolve, reject) => {
+    const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result as QueuedAction[]); request.onerror = () => reject(request.error);
+  }); } finally { db.close(); }
+}
+async function save(action: QueuedAction, remove = false): Promise<void> {
+  const db = await openDb();
+  try { await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    if (remove) tx.objectStore(STORE_NAME).delete(action.local_id); else tx.objectStore(STORE_NAME).put(action);
+    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+  }); } finally { db.close(); }
+}
+function belongsToActor(action: QueuedAction) {
+  const owner = action.actor_id ?? action.payload.created_by ?? action.payload.received_by ?? action.payload.deposited_by ?? action.payload.p_created_by;
+  return !!context && owner === context.actorId;
+}
+export async function getPendingCount(): Promise<number> { return (await readActions()).filter((a) => belongsToActor(a) && !a.synced && !a.failed).length; }
+export async function getUnresolvedCount(registerId: string): Promise<number> { return (await readActions()).filter((a) => belongsToActor(a) && !a.synced && (!a.register_id || a.register_id === registerId)).length; }
+export async function getFailedActions(): Promise<QueuedAction[]> { return (await readActions()).filter((a) => belongsToActor(a) && a.failed); }
+export async function discardFailedAction(id: string): Promise<void> {
+  const action = (await readActions()).find((a) => a.local_id === id);
+  if (!action || !action.failed || !belongsToActor(action)) throw new Error('Only your own failed entries can be discarded.');
+  const { error } = await supabase.from('sync_failures').insert({ outlet_id: context!.outletId, device_id: action.device_id, table_name: action.table, error_message: `Reviewed and discarded: ${action.error_message}`, payload: action.payload });
+  if (error) throw error;
+  await save(action, true);
+}
+export async function queueAction(table: QueuedAction['table'], operation: QueuedAction['operation'], payload: Record<string, unknown>): Promise<string> {
+  const current = context;
+  const { data } = await supabase.auth.getSession();
+  if (!current || data.session?.user.id !== current.actorId || payload.outlet_id !== current.outletId) throw new Error('Open your outlet shift before recording entries.');
+  const id = crypto.randomUUID();
+  let deviceId = localStorage.getItem('device_id');
+  if (!deviceId) { deviceId = crypto.randomUUID(); localStorage.setItem('device_id', deviceId); }
+  await save({ local_id: id, actor_id: current.actorId, register_id: current.registerId, table, operation,
+    payload: { ...payload, register_date: payload.register_date ?? businessDate() }, created_offline_at: new Date().toISOString(), device_id: deviceId, synced: false });
+  if (navigator.onLine) void syncPendingActions();
   return id;
 }
-
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'local_id' });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+export async function runCashAction(kind: QueuedAction['table'], payload: Record<string, unknown>, operationId = crypto.randomUUID()) {
+  const current = context;
+  if (!current) throw new Error('Open your outlet shift first.');
+  const { data, error } = await supabase.rpc('submit_cash_action', { p_operation_id: operationId, p_kind: kind,
+    p_payload: { ...payload, outlet_id: current.outletId }, p_register_id: current.registerId, p_actor_id: current.actorId });
+  if (error) throw error;
+  return data;
 }
-
-// Queue an action locally. Call this INSTEAD of calling supabase directly
-// for any bill/payment/expense/admission/deposit write, so the app works
-// identically online or offline.
-export async function queueAction(
-  table: QueuedAction['table'],
-  operation: QueuedAction['operation'],
-  payload: Record<string, unknown>
-): Promise<string> {
-  const local_id = crypto.randomUUID();
-  const action: QueuedAction = {
-    local_id,
-    table,
-    operation,
-    payload,
-    created_offline_at: new Date().toISOString(), // real event time, preserved through sync
-    device_id: getDeviceId(),
-    synced: false,
-  };
-
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    tx.objectStore(STORE_NAME).put(action);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-
-  // Try immediate sync if online; otherwise it waits for the next sync pass.
-  if (navigator.onLine) {
-    void syncPendingActions();
-  }
-  return local_id;
-}
-
-export async function getPendingCount(): Promise<number> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const req = tx.objectStore(STORE_NAME).getAll();
-    req.onsuccess = () => {
-      // "Pending" means still trying — a failed item has stopped
-      // retrying and needs a human decision, so it's counted
-      // separately (see getFailedActions) rather than inflating the
-      // "still syncing" number forever.
-      const pending = (req.result as QueuedAction[]).filter((a) => !a.synced && !a.failed);
-      resolve(pending.length);
-    };
-    req.onerror = () => reject(req.error);
-  });
-}
-
-// Items that permanently failed and will never be retried
-// automatically — surfaced so a person can fix or discard them.
-export async function getFailedActions(): Promise<QueuedAction[]> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const req = tx.objectStore(STORE_NAME).getAll();
-    req.onsuccess = () => {
-      resolve((req.result as QueuedAction[]).filter((a) => a.failed));
-    };
-    req.onerror = () => reject(req.error);
-  });
-}
-
-// Removes a failed item from the queue permanently — for entries the
-// person has reviewed and decided not to re-attempt (e.g. a genuine
-// duplicate bill number that should just be re-entered correctly).
-export async function discardFailedAction(local_id: string): Promise<void> {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    tx.objectStore(STORE_NAME).delete(local_id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-// Replays queued actions in the order they were created.
-// A register cannot be closed (see registerService.closeRegister) while
-// this returns any pending items for that outlet/date.
-//
-// Guarded by isSyncing: queueAction fires this in the background on
-// every write without awaiting it, so two writes made in quick
-// succession (e.g. a bill then its payment) could otherwise trigger
-// two overlapping passes that both try to process the same
-// not-yet-synced item — risking a duplicate insert or a
-// double-counted register total.
-let isSyncing = false;
-
+let syncing = false;
 export async function syncPendingActions(): Promise<void> {
-  if (isSyncing) return;
-  isSyncing = true;
+  if (syncing || !context) return;
+  syncing = true;
   try {
-    await runSyncPass();
-  } finally {
-    isSyncing = false;
-  }
-}
-
-async function runSyncPass(): Promise<void> {
-  const db = await openDb();
-  const actions: QueuedAction[] = await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const req = tx.objectStore(STORE_NAME).getAll();
-    req.onsuccess = () => resolve(req.result as QueuedAction[]);
-    req.onerror = () => reject(req.error);
-  });
-
-  const pending = actions
-    .filter((a) => !a.synced && !a.failed)
-    .sort((a, b) => a.created_offline_at.localeCompare(b.created_offline_at));
-
-  for (const action of pending) {
-    try {
-      let error: { message: string; code?: string } | null = null;
-      let outletId: unknown;
-
-      if (action.operation === 'rpc') {
-        ({ error } = await supabase.rpc(action.table, action.payload));
-        // RPC params are named p_* to match the Postgres function
-        // signature, so pull outlet id from there for the sync_log row.
-        outletId = action.payload.p_outlet_id ?? action.payload.outlet_id;
-      } else {
-        const table = supabase.from(action.table);
-        ({ error } =
-          action.operation === 'insert'
-            ? await table.insert(action.payload)
-            : await table.update(action.payload).eq('id', action.payload.id as string));
-        outletId = action.payload.outlet_id;
+    const run = async () => {
+      // Failed diagnostics remain durable locally until the server accepts them.
+      for (const failed of (await readActions()).filter((a) => belongsToActor(a) && a.failed && !a.failure_reported)) {
+        const { error } = await supabase.from('sync_failures').insert({ id: failed.local_id, outlet_id: failed.payload.outlet_id ?? context!.outletId,
+          device_id: failed.device_id, table_name: failed.table, error_message: failed.error_message, payload: failed.payload });
+        if (!error || error.code === '23505') await save({ ...failed, failure_reported: true });
       }
-
-      if (error) {
-        if (isPermanentError(error.code)) {
-          // Stop retrying — this exact payload will never succeed.
-          // Flag it so the UI can show the person what happened and
-          // let them discard it or fix it manually, instead of
-          // silently retrying an impossible write every 30 seconds.
-          //
-          // Also log it server-side (sync_failures) so HQ actually finds
-          // out — previously this only went to console.error, which nobody
-          // is ever watching on a cashier's phone. A trigger on that table
-          // (migration 0021) fires an SMS alert automatically.
-          console.error('Permanent sync failure for', action.local_id, error.message);
-          try {
-            await supabase.from('sync_failures').insert({
-              outlet_id: (outletId as string | undefined) ?? null,
-              device_id: action.device_id,
-              table_name: action.table,
-              error_message: error.message,
-              payload: action.payload,
-            });
-          } catch (logErr) {
-            // Logging the failure failed too (e.g. fully offline) — the
-            // item is still flagged `failed` locally below, so nothing
-            // is lost; it just won't alert until the device is back
-            // online and the person opens the app again to trigger a
-            // fresh sync pass.
-            console.error('Could not log sync_failures row for', action.local_id, logErr);
-          }
-          const markDb = await openDb();
-          const tx = markDb.transaction(STORE_NAME, 'readwrite');
-          tx.objectStore(STORE_NAME).put({ ...action, failed: true, error_message: error.message });
-        } else {
-          // Leave it queued; will retry on next sync pass (network flap,
-          // a momentary RLS mismatch, or a foreign key waiting on a
-          // still-unsynced row from earlier in the queue).
-          console.error('Sync failed for', action.local_id, error.message);
+      const actions = (await readActions()).filter((a) => belongsToActor(a) && !a.synced && !a.failed).sort((a, b) => a.created_offline_at.localeCompare(b.created_offline_at));
+      for (const action of actions) {
+        if (!belongsToActor(action)) break;
+        if (!action.actor_id || !action.register_id || action.table === 'record_walk_in_sale') {
+          await save({ ...action, failed: true, error_message: 'Older app entry: reconcile with HQ before re-entering. It has no verified original shift.' }); continue;
         }
-        continue;
+        const { data: session } = await supabase.auth.getSession();
+        if (session.session?.user.id !== action.actor_id) break;
+        const { error } = await supabase.rpc('submit_cash_action', { p_operation_id: action.local_id, p_kind: action.table, p_payload: action.payload, p_register_id: action.register_id, p_actor_id: action.actor_id });
+        if (error) {
+          if (PERMANENT_CODES.has(error.code ?? '')) await save({ ...action, failed: true, error_message: error.message });
+          break;
+        }
+        await save(action, true);
       }
-
-      // Record the mapping + mark synced
-      await supabase.from('sync_log').insert({
-        local_id: action.local_id,
-        table_name: action.table,
-        outlet_id: outletId,
-        device_id: action.device_id,
-        created_offline_at: action.created_offline_at,
-        synced_at: new Date().toISOString(),
-      });
-
-      // Fully done with this item now — delete rather than flag
-      // synced:true and keep it forever. There's nothing in this app
-      // that reads back a synced item's history from this local
-      // store, so leaving it here indefinitely would just grow
-      // IndexedDB without bound over the life of the device.
-      const markDb = await openDb();
-      const tx = markDb.transaction(STORE_NAME, 'readwrite');
-      tx.objectStore(STORE_NAME).delete(action.local_id);
-    } catch (err) {
-      console.error('Sync error for', action.local_id, err);
-    }
-  }
+    };
+    if (navigator.locks) await navigator.locks.request('cash-mgmt-sync', run); else await run();
+  } catch (error) { console.error('Cash sync will retry:', error); }
+  finally { syncing = false; }
 }
-
-// Call once at app startup to retry sync whenever connectivity returns.
-export function initOfflineSync(): void {
-  window.addEventListener('online', () => void syncPendingActions());
-  // Also retry periodically in case 'online' event is unreliable on the device
-  setInterval(() => {
-    if (navigator.onLine) void syncPendingActions();
-  }, 30_000);
+export function initOfflineSync(): () => void {
+  const retry = () => { if (navigator.onLine) void syncPendingActions(); };
+  window.addEventListener('online', retry);
+  const interval = setInterval(retry, 30_000);
+  return () => { window.removeEventListener('online', retry); clearInterval(interval); };
 }

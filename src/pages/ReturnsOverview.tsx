@@ -1,3 +1,4 @@
+import ReturnApprovals from '../components/ReturnApprovals';
 import { useEffect, useState } from 'react';
 import { getAllReturns, type ReturnReadable } from '../lib/returnsService';
 
@@ -13,6 +14,7 @@ export default function ReturnsOverview() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-4">
+      <ReturnApprovals />
       <h2 className="text-lg font-semibold text-slate-800">Returns (All Outlets)</h2>
       {loading && <p className="text-sm text-slate-500">Loading…</p>}
       {!loading && returns.length === 0 && <p className="text-sm text-slate-500">No returns recorded.</p>}

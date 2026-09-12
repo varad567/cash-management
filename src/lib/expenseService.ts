@@ -1,5 +1,6 @@
 import { queueAction } from './offlineQueue';
 import { supabase } from './supabaseClient';
+import { businessDate } from './cashDenominations';
 import { compressImage } from './imageUtils';
 import type { Expense } from './types';
 
@@ -47,7 +48,7 @@ export async function createExpense(params: CreateExpenseParams) {
     reason: params.reason,
     receipt_url: params.receiptPath,
     requires_hq_approval: params.requiresHqApproval,
-    register_date: new Date().toISOString().slice(0, 10),
+    register_date: businessDate(),
     created_by: params.createdBy,
   });
 }
@@ -87,10 +88,7 @@ export async function getExpensesForApproval(limit = 50): Promise<ExpenseReadabl
 // a rejection (e.g. the server-side role check) should surface right
 // away. The DB trigger independently re-verifies the approver's role
 // regardless of what the client believes.
-export async function approveExpense(expenseId: string, approvedBy: string) {
-  const { error } = await supabase
-    .from('expenses')
-    .update({ approved_by: approvedBy, approved_at: new Date().toISOString() })
-    .eq('id', expenseId);
+export async function approveExpense(expenseId: string) {
+  const { error } = await supabase.rpc('approve_cash_expense', { p_expense_id: expenseId });
   if (error) throw error;
 }

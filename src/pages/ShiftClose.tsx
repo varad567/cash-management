@@ -1,3 +1,5 @@
+import DenominationCounter from '../components/DenominationCounter';
+import { type CashDenominations } from '../lib/cashDenominations';
 import { useCallback, useEffect, useState } from 'react';
 import { closeShift, getRegisterById } from '../lib/shiftService';
 import { computeExpectedClosing } from '../lib/registerMath';
@@ -21,7 +23,8 @@ export default function ShiftClose({ register: initialRegister, onClosed, onCanc
   // sees can't drift from what closeShift() will actually compute.
   const [register, setRegister] = useState(initialRegister);
   const [refreshedOnce, setRefreshedOnce] = useState(false);
-  const [countedClosing, setCountedClosing] = useState('');
+  const [denominations, setDenominations] = useState<CashDenominations>({});
+  const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ShiftRegister | null>(null);
@@ -32,32 +35,21 @@ export default function ShiftClose({ register: initialRegister, onClosed, onCanc
   }, [initialRegister.id]);
 
   useEffect(() => {
-    void refresh();
-    const interval = setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    void refresh().catch((err) => setError(err.message));
+    const interval = setInterval(() => void refresh().catch((err) => setError(err.message)), POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [refresh]);
 
   const runningExpected = computeExpectedClosing(register);
 
   async function handleSubmit() {
-    if (!appUser || countedClosing === '') return;
-    if (Number(countedClosing) < 0) {
-      setError('Counted cash cannot be negative');
-      return;
-    }
-    // One last refresh immediately before submitting — closes the
-    // window between the cashier's last glance at the screen and the
-    // moment they hit confirm. closeShift() re-fetches independently
-    // anyway for the actual math, but this keeps what's on screen
-    // honest right up to the click.
-    await refresh();
+    if (!appUser || !confirmed) return;
     setSubmitting(true);
     setError(null);
     try {
       const closed = await closeShift({
         registerId: register.id,
-        countedClosing: Number(countedClosing),
-        closedBy: appUser.id,
+        denominations: Object.keys(denominations).length ? denominations : { "1": 0 },
       });
       setResult(closed);
     } catch (err) {
@@ -103,11 +95,12 @@ export default function ShiftClose({ register: initialRegister, onClosed, onCanc
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow p-8 max-w-md w-full">
         <h1 className="text-xl font-semibold text-slate-800 mb-1">Close Your Shift</h1>
-        <p className="text-sm text-slate-500 mb-6">Count the drawer and enter the total.</p>
+        <p className="text-sm text-slate-500 mb-6">Count the notes and coins in the drawer.</p>
 
         <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-4 text-sm space-y-1">
           {!refreshedOnce && <p className="text-slate-400 text-xs mb-2">Loading latest totals…</p>}
           <Row label="Opening balance" value={register.opening_balance} />
+          <Row label="Customer credits received" value={register.credits_received ?? 0} />
           <Row label="Cash sales" value={register.cash_sales} />
           <Row label="Old-bill collections" value={register.cash_collected_old_bills} />
           <Row label="Expenses paid" value={-register.expenses_paid} />
@@ -120,19 +113,8 @@ export default function ShiftClose({ register: initialRegister, onClosed, onCanc
           </div>
         </div>
 
-        <label className="block text-sm font-medium text-slate-700 mb-1">
-          Counted cash in drawer
-        </label>
-        <input
-          type="number"
-          inputMode="decimal"
-          min="0"
-          step="0.01"
-          className="w-full text-lg border border-slate-300 rounded-lg px-4 py-3 mb-6"
-          value={countedClosing}
-          onChange={(e) => setCountedClosing(e.target.value)}
-          placeholder="0.00"
-        />
+        <DenominationCounter label="Closing cash count" value={denominations} onChange={(v) => { setDenominations(v); setConfirmed(false); }} />
+        <label className="flex gap-2 text-sm mb-4"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />I counted and confirm these quantities, including any zero balance.</label>
 
         {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
 
@@ -144,7 +126,7 @@ export default function ShiftClose({ register: initialRegister, onClosed, onCanc
             Back
           </button>
           <button
-            disabled={countedClosing === '' || submitting}
+            disabled={!confirmed || submitting || !refreshedOnce}
             onClick={() => void handleSubmit()}
             className="flex-1 bg-slate-800 text-white font-medium rounded-lg py-3 disabled:opacity-40"
           >

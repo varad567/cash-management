@@ -1,3 +1,4 @@
+import { businessDate } from './cashDenominations';
 import { queueAction } from './offlineQueue';
 import { supabase } from './supabaseClient';
 
@@ -25,7 +26,7 @@ export async function createDeposit(params: CreateDepositParams) {
     amount: params.amount,
     bank_reference: params.bankReference ?? null,
     deposited_by: params.depositedBy,
-    register_date: new Date().toISOString().slice(0, 10),
+    register_date: businessDate(),
   });
 }
 

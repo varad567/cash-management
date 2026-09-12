@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { createDeposit, getRecentDeposits, type CashDeposit } from '../lib/cashDepositService';
 import { getOpenRegister } from '../lib/shiftService';
 import { useAuth } from '../lib/AuthContext';
+import { computeExpectedClosing } from '../lib/registerMath';
 
 export default function CashDeposits() {
   const { appUser } = useAuth();
@@ -23,14 +24,7 @@ export default function CashDeposits() {
     if (!appUser?.outlet_id) return;
     const register = await getOpenRegister(appUser.outlet_id);
     if (register) {
-      setAvailable(
-        register.opening_balance +
-          register.cash_sales +
-          register.cash_collected_old_bills -
-          register.expenses_paid -
-          register.deposits_made -
-          register.cash_returned
-      );
+      setAvailable(computeExpectedClosing(register));
     }
   }
 

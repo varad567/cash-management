@@ -1,3 +1,4 @@
+import type { CashDenominations } from './cashDenominations';
 export type UserRole = 'cashier' | 'manager' | 'audit' | 'hq';
 
 export interface Outlet {
@@ -109,6 +110,9 @@ export interface ShiftRegister {
   deposits_made: number;
   cash_returned: number;
   credits_refunded: number;
+  credits_received: number;
+  opening_denominations: CashDenominations | null;
+  closing_denominations: CashDenominations | null;
   expected_closing: number | null;
   counted_closing: number | null;
   mismatch: number | null;
@@ -126,6 +130,8 @@ export interface ShiftRegister {
 // (e.g. record_walk_in_sale) — see offlineQueue.ts.
 export interface QueuedAction {
   local_id: string;
+  actor_id?: string;
+  register_id?: string;
   table:
     | 'bills'
     | 'payments'
@@ -134,7 +140,10 @@ export interface QueuedAction {
     | 'cash_deposits'
     | 'returns'
     | 'customer_credits'
-    | 'record_walk_in_sale';
+    | 'record_walk_in_sale'
+    | 'sale'
+    | 'credit_apply'
+    | 'credit_refund';
   operation: 'insert' | 'update' | 'rpc';
   payload: Record<string, unknown>;
   created_offline_at: string; // actual event time — used for register_date, never sync time
@@ -147,6 +156,7 @@ export interface QueuedAction {
   // network/RLS hiccup, which stays retryable.
   failed?: boolean;
   error_message?: string;
+  failure_reported?: boolean;
 }
 
 export interface AlertRecipient {
