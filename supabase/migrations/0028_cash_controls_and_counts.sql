@@ -1,7 +1,34 @@
 -- Deploy with the matching frontend, after draining old offline queues.
 -- Historical financial rows are deliberately not rewritten.
+begin;
 create schema if not exists cash_private;
 revoke all on schema cash_private from public, anon, authenticated;
+
+-- Restore the prerequisites from 0019 when 0020 was applied without it.
+-- Existing credits retain an unknown original register; never infer cash history.
+alter table public.customer_credits
+  add column if not exists register_id uuid references public.shift_registers(id);
+create index if not exists idx_credits_register on public.customer_credits(register_id);
+drop trigger if exists trg_stamp_register_credits on public.customer_credits;
+create trigger trg_stamp_register_credits before insert on public.customer_credits
+  for each row execute function public.stamp_current_register();
+
+create function cash_private.check_credit_bill_outlet()
+returns trigger language plpgsql set search_path = public, pg_temp as $$
+declare v_bill_outlet uuid;
+begin
+  if new.bill_id is not null then
+    select outlet_id into v_bill_outlet from bills where id = new.bill_id;
+    if v_bill_outlet is distinct from new.outlet_id then
+      raise exception 'Credit outlet does not match the outlet of the originating bill';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists trg_check_credit_bill_outlet on public.customer_credits;
+create trigger trg_check_credit_bill_outlet before insert on public.customer_credits
+  for each row execute function cash_private.check_credit_bill_outlet();
 
 alter table shift_registers
   add column opening_denominations jsonb,
@@ -88,9 +115,21 @@ revoke insert, update, delete, truncate, references, trigger on
   bills, payments, expenses, cash_deposits, customer_credits, shift_registers,
   returns, admissions, audit_log, sync_log from public, anon, authenticated;
 drop policy if exists audit_insert on audit_log;
-revoke execute on function record_walk_in_sale(uuid,text,numeric,numeric,payment_mode,text,uuid) from public,anon,authenticated;
-revoke execute on function use_customer_credit(uuid,uuid,uuid) from public,anon,authenticated;
-revoke execute on function send_daily_digest(date) from public,anon,authenticated;
+-- Some deployed databases lack these legacy RPCs or have different overloads.
+-- Revoke every existing public overload without requiring an obsolete signature.
+do $legacy_rpc_revocations$
+declare v_function regprocedure;
+begin
+  for v_function in
+    select p.oid::regprocedure from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public' and p.prokind = 'f'
+      and p.proname in ('record_walk_in_sale', 'use_customer_credit', 'send_daily_digest')
+  loop
+    execute format('revoke execute on function %s from public, anon, authenticated', v_function);
+  end loop;
+end;
+$legacy_rpc_revocations$;
 
 -- Replace stale JWT-only administrative policies with current account checks.
 drop policy if exists users_insert_hq on app_users;
@@ -203,6 +242,11 @@ begin
   return new;
 end;
 $$;
+
+-- 0020 replaces the function but does not recreate this 0019 trigger.
+drop trigger if exists trg_refund_customer_credit on public.customer_credits;
+create trigger trg_refund_customer_credit before update on public.customer_credits
+  for each row execute function public.refund_customer_credit();
 
 create or replace function enforce_shift_close_rules()
 returns trigger language plpgsql set search_path = public, pg_temp as $$
@@ -440,3 +484,5 @@ create view credit_receipt_entries with (security_invoker=true) as
 select register_id,outlet_id,'credit_received'::text as entry_type,amount,'Customer credit: '||reason as description,
  created_by,created_at from customer_credits where receipt_recorded;
 grant select on credit_receipt_entries to authenticated;
+
+commit;

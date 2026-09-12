@@ -1,13 +1,14 @@
 import { beforeAll,afterAll,beforeEach,afterEach,describe,it,expect } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { createDatabase,asUser,action,ids } from './helpers/database';
+describe.each([false, true])('credit setup 0019 missing: %s', (skipCreditSetup) => {
 let db: PGlite; let register: string; let bill: string;
 async function rows(sql: string) { return (await db.query(sql)).rows as Record<string,unknown>[]; }
 async function rejected(sql: string, pattern: RegExp) {
   await db.exec('savepoint reject_test');
   try { await expect(db.exec(sql)).rejects.toThrow(pattern); } finally { await db.exec('rollback to savepoint reject_test'); }
 }
-beforeAll(async()=>{db=await createDatabase();},60000);
+beforeAll(async()=>{db=await createDatabase({skipCreditSetup});},60000);
 afterAll(async()=>{await db?.close();});
 beforeEach(async()=>{
   await db.exec('reset role; begin');await asUser(db);
@@ -87,8 +88,11 @@ describe('cash database controls after every migration',()=>{
   });
   it('records credit receipt and refunds without losing or inventing cash',async()=>{
     const credit=await action(db,register,'customer_credits',{amount:100,reason:'Excess'});
+    expect((await rows(`select register_id from customer_credits where id='${credit.id}'`))[0].register_id).toBe(register);
     expect((await rows(`select credits_received from shift_registers where id='${register}'`))[0].credits_received).toBe('100.00');
     await action(db,register,'credit_refund',{credit_id:credit.id});
+    expect((await rows(`select refunded_register_id,refunded_by,resolved_at from customer_credits where id='${credit.id}'`))[0]).toMatchObject({refunded_register_id:register,refunded_by:ids.cashier,resolved_at:expect.any(Date)});
+    expect((await rows(`select credits_refunded from shift_registers where id='${register}'`))[0].credits_refunded).toBe('100.00');
     expect((await rows(`select mismatch from close_cash_shift('${register}','{"500":2}')`))[0].mismatch).toBe('0.00');
     await asUser(db,ids.hq,'hq',null);
     expect(Number((await rows(`select count(*) as n from audit_log where table_name='customer_credits'`))[0].n)).toBe(2);
@@ -105,6 +109,13 @@ describe('cash database controls after every migration',()=>{
     const credit=await action(db,register,'customer_credits',{amount:100,reason:'Excess'});
     await action(db,register,'credit_refund',{credit_id:credit.id});
     await expect(action(db,register,'cash_deposits',{amount:1001})).rejects.toThrow(/Deposit exceeds/);
+  });
+  it('rejects a customer credit linked to another outlet bill',async()=>{
+    await asUser(db,ids.other,'manager',ids.outlet2);
+    const otherRegister=(await rows(`select id from open_cash_shift('${ids.outlet2}','{"500":0}')`))[0].id as string;
+    const otherBill=await action(db,otherRegister,'sale',{outlet_id:ids.outlet2,bill_serial:'OTHER',bill_type:'walk_in',bill_amount:100,cash_amount:100,online_amount:0},crypto.randomUUID(),ids.other);
+    await asUser(db);
+    await expect(action(db,register,'customer_credits',{amount:50,reason:'Excess',bill_id:otherBill.id})).rejects.toThrow(/Credit outlet does not match/);
   });
   it('blocks fabricated audit events and read-only auditor writes',async()=>{
     await rejected(`insert into audit_log(table_name,record_id,action,changed_by) values('bills','${bill}','APPROVE','${ids.hq}')`,/permission denied/);
@@ -161,4 +172,5 @@ describe('cash database controls after every migration',()=>{
       expect.objectContaining({type:'shift_closed',credits_received:100}),expect.objectContaining({type:'daily_digest',total_credits_received:100})
     ]));
   });
+});
 });

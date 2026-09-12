@@ -19,6 +19,8 @@ No historical financial numbers are automatically rewritten. Legacy held credits
 
 ## Validation
 
+Migration compatibility repair, 12 September 2026: **79 unit/database tests now pass**. The cash-control suite runs against both the complete migration history and a history with 0019 omitted, matching the reported missing credit column and triggers. Migration 0028 now restores the register column/index, receipt shift stamping, originating-bill outlet validation, and the before-update credit refund/state trigger. It preserves the existing 0020 refund-total trigger and does not backfill historical credit register IDs or change amounts. Legacy RPC revocation tolerates absent functions and revokes existing overloads. The entire 0028 file now includes its own BEGIN/COMMIT. This repair is for databases where 0028 has not applied; do not rerun a successfully applied 0028. Later compatibility edits must also be committed/pushed if the original release branch was already pushed.
+
 Local results on 12 September 2026: **55 unit/database tests passed, 4 browser tests passed**, production build and Edge TypeScript checks passed, lint completed with warnings and no errors, and `git diff --check` passed. The Windows sandbox required manually stopping the test-owned Vite process after the browser assertions passed; the test runner then exited successfully. The deposit screen now shares the closing formula, including both credit receipts and refunds.
 
 Run `npm ci`, `npm test`, `npm run check:edge`, `npm run build`, `npm run lint`, and `npm run test:e2e`.

@@ -7,7 +7,7 @@ export const ids = {
   other: '10000000-0000-0000-0000-000000000005', outlet: '20000000-0000-0000-0000-000000000001',
   outlet2: '20000000-0000-0000-0000-000000000002', admission: '50000000-0000-0000-0000-000000000001',
 };
-export async function createDatabase() {
+export async function createDatabase(options: { skipCreditSetup?: boolean } = {}) {
   const db = new PGlite();
   await db.exec(`
     create role anon; create role authenticated; create role supabase_auth_admin; create role service_role bypassrls;
@@ -27,6 +27,7 @@ export async function createDatabase() {
   `);
   const path = resolve('supabase/migrations');
   for (const file of readdirSync(path).filter((f) => f.endsWith('.sql')).sort()) {
+    if (options.skipCreditSetup && file === '0019_customer_credits.sql') continue;
     const sql = readFileSync(resolve(path,file),'utf8').replace(/create extension if not exists (?:"pgcrypto"|pg_net|pg_cron);/gi,'');
     try { await db.exec(sql); } catch (e) { throw new Error(`Migration ${file}: ${(e as Error).message}`); }
   }
